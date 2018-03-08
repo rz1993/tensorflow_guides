@@ -13,6 +13,8 @@ class ConvVAE:
         self._input_spec = input_spec
 
         self._batcher = batch_generator
+        self._losses_tr = []
+        self._losses_val = []
 
         self._kernels = None
         self._sess = None
@@ -37,18 +39,27 @@ class ConvVAE:
     def _build_posterior(self, encoding):
         '''
         Build layers for posterior parameter approximation.
+        Args:
+            - encoding: a tensor containing the learned representation of
+                        model inputs that will be linearly transformed to
+                        approximate the parameters to our latent posterior
+        Returns:
+            - z_sample: a sampled tensor from the approximated distribution
+                        conditioned on the input.
         '''
-        h, w, d = tf.shape(encoding)[1:]
+        # Reshape the encoding to shape [batch_size, flattened_dim]
+        h, w, d = encoding.get_shape().as_list()[1:]
         flat_dim = h * w * d
         z_dim = self._z_dim
         flat_encoding = tf.reshape(encoding, shape=[-1, flat_dim])
 
-        # Dense layers for posterior parameter estimation
+        # Dense layers for approximating the latent mean and log stddev
+        # We approximate log sttdev instead of stddev to ensure nonnegativity
         self.z_mu = dense(z_dim, flat_encoding)
         self.z_log_sigma = 0.5 * dense(z_dim, flat_encoding)
         self.z_sigma = tf.exp(self.z_log_sigma)
 
-        # Sample from posterior
+        # Sample from posterior using the 'reparameterization trick'
         z_sample = self.z_mu + self.z_sigma * tf.random_normal()
         return z_sample
 
@@ -67,9 +78,10 @@ class ConvVAE:
         kernels = []
         layer_inputs = inputs
         for i in range(len(kernel_sizes)):
-            depth_in = tf.shape(layer_inputs)[3]
+            depth_in = layer_inputs.get_shape().as_list()[-1]
             depth_out = layer_sizes[i]
 
+            # Instantiate the sparsely connected shared kernel weights
             W = tf.Variable(
                 tf.random_normal(
                     [kernel_sizes[i],
@@ -80,7 +92,7 @@ class ConvVAE:
             b = tf.Variable(tf.zeros([depth_out]))
             kernels.append(W)
 
-            # Apply convolution
+            # Apply convolution and a relu activation
             layer_inputs = tf.nn.conv2d(input=layer_inputs,
                                         filter=W,
                                         strides=[1, 1, 1, 1],
@@ -101,13 +113,15 @@ class ConvVAE:
         kernels = self._kernels
         kernels.reverse()
 
-        h, w, d = tf.shape(self.encoding)[1:]
+        # Project and reshape the sampled latent variable so that it can be convolved
+        h, w, d = self.encoding.get_shape().as_list()[1:]
         flat_dim = h * w * d
         layer_inputs = dense(flat_dim, z)
         layer_inputs = tf.reshape(layer_inputs, [-1, h, w, d])
 
+        # Encoding convolutions are applied in reverse
         for i in range(len(kernels)):
-            depth_in, depth_out = tf.shape(layer_inputs)[2:]
+            depth_out = layer_inputs.get_shape().as_list()[-1]
             W = kernels[i]
             b = tf.Variable(tf.zeros([depth_out]))
 
@@ -152,7 +166,7 @@ class ConvVAE:
 
     def _run_train_step(self, inputs, sess=None):
         if sess is None:
-            sess = self.sess
+            sess = self._init_session()
 
         loss_, _ = sess.run(
             [self.loss, self.optimizer],
